@@ -9,7 +9,7 @@ import { mergeAudioFiles } from '@/lib/audioMerger';
 
 import * as googleTTS from 'google-tts-api';
 
-let clientOptions: textToSpeech.ClientOptions | null = null;
+let clientOptions: any = null;
 let useCloudTTS = false;
 
 if (process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY) {
