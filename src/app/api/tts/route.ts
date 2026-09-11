@@ -1,11 +1,7 @@
 import { NextResponse } from 'next/server';
 import textToSpeech from '@google-cloud/text-to-speech';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import crypto from 'crypto';
 import { chunkKhmerText } from '@/lib/khmerChunker';
-import { mergeAudioFiles } from '@/lib/audioMerger';
 
 import * as googleTTS from 'google-tts-api';
 
@@ -57,13 +53,9 @@ export async function POST(req: Request) {
     if (pitch === 'Lower') effectivePitch = -2.0;
     if (pitch === 'Higher') effectivePitch = 2.0;
 
-    // Apply "Conversational Warm" style adjustments
-    // "Speech style: Normal, slightly overlapping pacing. Tone is energetic, conversational, and warm."
-    // We approximate "energetic" with a very slight pitch increase (if not already adjusted)
-    // and "conversational" with a tiny speed bump to make it flow better.
     if (style === 'Conversational Warm') {
       if (pitch === 'Normal') effectivePitch += 1.0; 
-      effectiveSpeed *= 1.05; // 5% faster for connected, slightly overlapping pacing
+      effectiveSpeed *= 1.05;
     }
 
     const audioConfig = {
@@ -74,14 +66,13 @@ export async function POST(req: Request) {
 
     const maxChunkSize = useCloudTTS ? 1500 : 200;
     const chunks = chunkKhmerText(text, maxChunkSize);
-    const tempDir = os.tmpdir();
-    const sessionId = crypto.randomUUID();
-    const tempFiles: string[] = [];
+    
+    // We will collect all audio buffers here
+    const audioBuffers: Buffer[] = [];
 
     // Process each chunk
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
-      const tempFilePath = path.join(tempDir, `chunk_${sessionId}_${i}.mp3`);
 
       try {
         if (useCloudTTS && client) {
@@ -92,13 +83,10 @@ export async function POST(req: Request) {
           };
           const [response] = await client.synthesizeSpeech(request);
           if (response.audioContent) {
-            fs.writeFileSync(tempFilePath, response.audioContent, 'binary');
-            tempFiles.push(tempFilePath);
+            audioBuffers.push(Buffer.from(response.audioContent as Uint8Array));
           }
         } else {
           // Free fallback using google-tts-api
-          // Note: The free API does not support voice names, pitch, or speed precisely.
-          // It only supports a boolean 'slow' parameter.
           const isSlow = effectiveSpeed < 1.0;
           const base64Audio = await googleTTS.getAudioBase64(chunk, {
             lang: 'km',
@@ -106,34 +94,21 @@ export async function POST(req: Request) {
             host: 'https://translate.google.com',
             timeout: 10000,
           });
-          const buffer = Buffer.from(base64Audio, 'base64');
-          fs.writeFileSync(tempFilePath, buffer);
-          tempFiles.push(tempFilePath);
+          audioBuffers.push(Buffer.from(base64Audio, 'base64'));
         }
       } catch (ttsError: unknown) {
         console.error(`TTS API Error for chunk ${i}:`, ttsError);
-        // Clean up temp files if an error occurs
-        tempFiles.forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
         return NextResponse.json({ error: 'Failed to generate audio from TTS API. Check configuration.' }, { status: 500 });
       }
     }
 
-    if (tempFiles.length === 0) {
+    if (audioBuffers.length === 0) {
       return NextResponse.json({ error: 'No audio generated' }, { status: 500 });
     }
 
-    const finalOutputFile = path.join(tempDir, `final_${sessionId}.mp3`);
-
-    // Merge files
-    await mergeAudioFiles(tempFiles, finalOutputFile);
-
-    // Read the final file
-    const audioBuffer = fs.readFileSync(finalOutputFile);
-    const base64Audio = audioBuffer.toString('base64');
-
-    // Clean up
-    tempFiles.forEach(f => { if (fs.existsSync(f)) fs.unlinkSync(f); });
-    if (fs.existsSync(finalOutputFile)) fs.unlinkSync(finalOutputFile);
+    // Concatenate all MP3 buffers into a single buffer
+    const finalBuffer = Buffer.concat(audioBuffers);
+    const base64Audio = finalBuffer.toString('base64');
 
     return NextResponse.json({
       success: true,
